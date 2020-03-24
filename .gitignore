@@ -4,8 +4,8 @@
 /field/
 /snapshots/
 /.idea/
-/block_bptree.h
-/main.cpp
-/main2.cpp
-/debug.h
-
+/src/block_bptree.h
+/src/main.cpp
+/src/main2.cpp
+/src/debug.h
+/backup/

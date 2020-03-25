@@ -14,7 +14,7 @@ using ds::move_backward;
 
 namespace bptree {
     typedef uint64_t LocaType;
-    const size_t DEGREE = 10;
+    const size_t DEGREE = 101;
     const size_t INTERNAL_MIN_ENTRY = (DEGREE-1)/2;
     const size_t LEAF_MIN_ENTRY = (DEGREE/2);
     const size_t INTERNAL_MAX_ENTRY = DEGREE-1;

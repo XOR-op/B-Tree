@@ -3,14 +3,15 @@
 #define BPTREE_BPTREE_H
 
 #include <memory>
-#include <algorithm>
 #include <cstring>
+#include "../include/algorithm.h"
 
 using std::tie;
-using std::lower_bound;
-using std::upper_bound;
-using std::move;
-using std::move_backward;
+using ds::lower_bound;
+using ds::upper_bound;
+using ds::move;
+using ds::move_backward;
+
 namespace bptree {
     typedef uint64_t LocaType;
     const size_t DEGREE = 10;
@@ -236,6 +237,7 @@ namespace bptree {
             NodePtr ptr = initNode(Node<KeyType, ValueType>::LEAF);
             ptr->prev = ptr->next = Node<KeyType, ValueType>::NONE;
             insert_inplace(ptr, key, value);
+            saveNode(ptr);
             root = ptr->offset;
             return;
         }
@@ -327,6 +329,7 @@ namespace bptree {
             move_backward(node->V, node->V+node->size, node->V+node->size+1);
             find_mid_key(index, LEFT) = node->K[0] = nearby->K[nearby->size-1];
             node->V[0] = nearby->V[nearby->size-1];
+            saveNode(path_stack[index-1]);
         } else if ((nearby = getRight(index)) && nearby->size > LEAF_MIN_ENTRY) {
             // RIGHT
             node->K[node->size] = nearby->K[0];
@@ -334,6 +337,7 @@ namespace bptree {
             move(nearby->K+1, nearby->K+nearby->size, nearby->K);
             move(nearby->V+1, nearby->V+nearby->size, nearby->V);
             find_mid_key(index, RIGHT) = nearby->K[0];
+            saveNode(path_stack[index-1]);
         } else return false;
         --nearby->size;
         ++node->size;
@@ -352,6 +356,7 @@ namespace bptree {
             node->K[0] = find_mid_key(index, LEFT);
             node->sub_nodes[0] = nearby->sub_nodes[nearby->size];
             find_mid_key(index, LEFT) = nearby->K[nearby->size-1];
+            saveNode(path_stack[index-1]);
         } else if ((nearby = getRight(index)) && nearby->size > LEAF_MIN_ENTRY) {
             // RIGHT
             node->K[node->size] = find_mid_key(index, RIGHT);
@@ -359,6 +364,7 @@ namespace bptree {
             find_mid_key(index, RIGHT) = nearby->K[0];
             move(nearby->K+1, nearby->K+nearby->size, nearby->K);
             move(nearby->sub_nodes+1, nearby->sub_nodes+nearby->size+1, nearby->sub_nodes);
+            saveNode(path_stack[index-1]);
         } else return false;
         --nearby->size;
         ++node->size;
@@ -475,7 +481,7 @@ namespace bptree {
 
     template<typename KeyType, typename ValueType>
     std::vector<std::pair<KeyType, ValueType>> BPTree<KeyType, ValueType>::range(KeyType low, KeyType high) {
-        decltype(range(0, 0)) ret;
+        decltype(range(KeyType(), KeyType())) ret;
         NodePtr ptr = path_stack[basic_search(low)];
         for (int i = (int) (lower_bound(ptr->K, ptr->K+ptr->size, low)-ptr->K); i < ptr->size; ++i) {
             if (ptr->K[i] >= high)goto FIN;

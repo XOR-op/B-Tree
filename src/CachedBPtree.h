@@ -2,7 +2,7 @@
 #ifndef BPTREE_CACHEDBPTREE_H
 #define BPTREE_CACHEDBPTREE_H
 
-#include <unordered_map>
+#include "../include/unordered_map.h"
 #include <fstream>
 #include <cstring>
 #include <functional>
@@ -28,8 +28,8 @@ namespace bptree {
             size_t next;
             size_t prev;
             Node<KeyType,ValueType> node;
-
-            Block() : next(LIST_END), prev(LIST_END) {}
+            bool dirty_page_bit;
+            Block() : next(LIST_END), prev(LIST_END),dirty_page_bit(false) {}
         };
 
         size_t count;
@@ -62,7 +62,8 @@ namespace bptree {
             pool[block.next].prev = block.prev;
             block.next = freelist_head;
             freelist_head = iter->second;
-            f_expire(&block.node);
+            if(pool[iter->second].dirty_page_bit)
+                f_expire(&block.node);
             table.erase(offset);
             return true;
         }
@@ -88,22 +89,29 @@ namespace bptree {
             // cache miss
             if (freelist_head == LIST_END)
                 if(!remove(pool[pool[LIST_END].prev].node.offset))
-                    throw std::runtime_error("???");
+                    throw std::runtime_error("Cache:remove failed");
             auto tmp=pool[freelist_head].next;
-            // set block the head
+            /*
+             * set block the head
+             * pool[freelist_head] will be assigned
+             */
             pool[pool[LIST_END].next].prev = freelist_head;
             pool[freelist_head].prev = LIST_END;
             pool[freelist_head].next = pool[LIST_END].next;
             pool[LIST_END].next = freelist_head;
-//            bzero(&pool[freelist_head].node, sizeof(pool[freelist_head].node));
             f_load(offset, &pool[freelist_head].node);
+            pool[freelist_head].dirty_page_bit= false;
             table[offset]=freelist_head;
+            // recover freelist_head
             freelist_head=tmp;
             return &pool[pool[LIST_END].next].node;
         }
+
+        void dirty_bit_set(LocaType offset){ pool[table[offset]].dirty_page_bit= true;}
         void destruct(){
             for (size_t index = pool[LIST_END].next; index != LIST_END; index = pool[index].next) {
-                f_expire(&pool[index].node);
+                if(pool[index].dirty_page_bit)
+                    f_expire(&pool[index].node);
             }
             delete[] pool;
             pool= nullptr;
@@ -120,7 +128,7 @@ namespace bptree {
     class CachedBPTree;
 
     template<typename KeyType, typename ValueType>
-    bool createTree(const std::string& path);
+    bool static createTree(const std::string& path);
 
     template<typename KeyType, typename ValueType>
     class CachedBPTree : public BPTree<KeyType, ValueType> {
@@ -146,7 +154,7 @@ namespace bptree {
         size_t file_size;
         LocaType freelist_head;
     public:
-        explicit CachedBPTree(const std::string& path, size_t block_size);
+        explicit CachedBPTree(const std::string& path, size_t block_size,bool create= false);
 
         friend bool createTree<KeyType,ValueType>(const std::string& path);
 
@@ -162,7 +170,7 @@ namespace bptree {
         ofs.seekp(node->offset);
         if (ofs.fail())throw std::runtime_error("CacheBPTree: Can't write");
         ofs.write(buffer, Node<KeyType,ValueType>::BLOCK_SIZE);
-        ofs.flush();
+//        ofs.flush();
         if (ofs.fail())throw std::runtime_error("CacheBPTree: Write failure");
     }
 
@@ -190,7 +198,7 @@ namespace bptree {
             writeBuffer(&n, block);
             file.seekp(file_size);
             file.write(block, Node::BLOCK_SIZE);
-            file.flush();
+//            file.flush();
             if (file.fail())throw std::runtime_error("CacheBPTree: initNode()");
             freelist_head = file_size;
             file_size += Node::BLOCK_SIZE;
@@ -203,7 +211,7 @@ namespace bptree {
 
     template<typename KeyType,typename ValueType>
     void CachedBPTree<KeyType,ValueType>::saveNode(NodePtr node) {
-        flush(file, node);
+        cache.dirty_bit_set(node->offset);
     }
 
     template<typename KeyType,typename ValueType>
@@ -217,12 +225,13 @@ namespace bptree {
         node->type = Node<KeyType,ValueType>::FREE;
         node->next = freelist_head;
         auto tmp = node->next;
+        saveNode(node);
         cache.remove(node->offset);
         freelist_head = tmp;
     }
 
     template <typename KeyType,typename ValueType>
-    bool createTree(const std::string& path) {
+    static bool createTree(const std::string& path) {
         std::fstream f(path, ios::in | ios::out | ios::binary);
         if (f.is_open() || f.bad()) { return false; }
         f.close();
@@ -244,10 +253,12 @@ namespace bptree {
     }
 
     template<typename KeyType,typename ValueType>
-    CachedBPTree<KeyType,ValueType>::CachedBPTree(const std::string& path, size_t block_size) :
-            BPTree<KeyType,ValueType>(), file(path, ios::in | ios::out | ios::binary),
+    CachedBPTree<KeyType,ValueType>::CachedBPTree(const std::string& path, size_t block_size,bool create) :
+            BPTree<KeyType,ValueType>(),
             cache(block_size, [this](LocaType o, NodePtr r) { load(file, o, r); }, [this](NodePtr o) { flush(file, o); }) {
-#define read_attribute(ATTR) memcpy((void*)&ATTR,ptr,sizeof(ATTR));ptr+=sizeof(ATTR)
+        if(create)
+            createTree<KeyType,ValueType>(path);
+        file=std::fstream (path, ios::in | ios::out | ios::binary);
         if (file.bad()) {
             throw std::runtime_error("CacheBPTree: Open B+ Tree failed.");
         }
@@ -255,6 +266,7 @@ namespace bptree {
         char* ptr = buf;
         file.seekg(0);
         file.read(buf, sizeof(buf));
+#define read_attribute(ATTR) memcpy((void*)&ATTR,ptr,sizeof(ATTR));ptr+=sizeof(ATTR)
         read_attribute(file_size);
         read_attribute(freelist_head);
         read_attribute(this->root);
@@ -272,6 +284,7 @@ namespace bptree {
         file.seekg(0);
         file.write(buf, sizeof(buf));
         cache.destruct();
+        file.flush();
         file.close();
 #undef write_attribute
     }

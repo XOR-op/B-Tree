@@ -5,4 +5,4 @@ bptree::CachedBPTree has integrated LRU cache in it. You can include `CachedBPTr
 - search(K): search specified key and return std::pair<KeyType,bool>. Not found if `pair->second` is False.
 - insert(K, V): insert a pair of data
 - remove(K): remove the pair with the specified key
-- range(K_low, K_high): get a range of data subject to K_low <= key < K_high
+- range(K_low, K_high): get a range of data subject to K_low <= key <= K_high

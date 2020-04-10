@@ -4,16 +4,17 @@
 
 #include <memory>
 #include <cstring>
-#include "../include/algorithm.h"
+#include <algorithm>
+#include "analysis.h"
 
 using std::tie;
-using ds::lower_bound;
-using ds::upper_bound;
-using ds::move;
-using ds::move_backward;
+using std::lower_bound;
+using std::upper_bound;
+using std::move;
+using std::move_backward;
 
 namespace bptree {
-    typedef uint64_t LocaType;
+    typedef uint64_t DiskLoc_T;
     const size_t DEGREE = 101;
     const size_t INTERNAL_MIN_ENTRY = (DEGREE-1)/2;
     const size_t LEAF_MIN_ENTRY = (DEGREE/2);
@@ -26,50 +27,53 @@ namespace bptree {
     const size_t STACK_DEPTH = 20;
 
 
-    template<typename KeyType, typename ValueType>
+    template<typename KeyType, typename ValueType, typename WeakCmp=std::less<KeyType>>
     struct Node {
         /*
          *  for internal node, max=DEGREE-1, min=floor((DEGREE-1)/2)
          *  for leaf node, max=DEGREE, min=floor(DEGREE/2)
          */
-        const static LocaType NONE = SIZE_MAX;
+        const static DiskLoc_T NONE = SIZE_MAX;
         typedef enum {
             FREE, LEAF, INTERNAL
         } type_t;
 
         type_t type;
-        LocaType offset; // when FREE, offset indicates what next free block is
-        LocaType next;
-        LocaType prev;
+        DiskLoc_T offset; // when FREE, offset indicates what next free block is
+        DiskLoc_T next;
+        DiskLoc_T prev;
         size_t size;    // K.size
-        KeyType K[DEGREE+1]; // DEGREE-1 if INTERNAL
+        union {
+            // avoid default construction
+            KeyType K[DEGREE+1]; // DEGREE-1 if INTERNAL
+        };
         union {
             ValueType V[DEGREE+1];
-            LocaType sub_nodes[DEGREE+1];  // more space for easier implementation of insert
+            DiskLoc_T sub_nodes[DEGREE+1];  // more space for easier implementation of insert
         };
+        Node(){}
 
 
         const static size_t LEAF_SIZE = sizeof(type)+sizeof(offset)+sizeof(next)
                                         +sizeof(prev)+sizeof(size)+sizeof(KeyType)*DEGREE+sizeof(ValueType)*DEGREE;
         const static size_t INTERNAL_SIZE = sizeof(type)+sizeof(offset)+sizeof(next)
-                                            +sizeof(prev)+sizeof(size)+sizeof(KeyType)*DEGREE+sizeof(LocaType)*DEGREE;
+                                            +sizeof(prev)+sizeof(size)+sizeof(KeyType)*DEGREE+sizeof(DiskLoc_T)*DEGREE;
         const static size_t BLOCK_SIZE = std::max(LEAF_SIZE, INTERNAL_SIZE);
     };
 
 
-    template<typename KeyType, typename ValueType>
+    template<typename KeyType, typename ValueType, typename WeakCmp>
     void writeBuffer(Node<KeyType, ValueType>* node, char* buf);
 
-    template<typename KeyType, typename ValueType>
+    template<typename KeyType, typename ValueType, typename WeakCmp>
     void readBuffer(Node<KeyType, ValueType>* node, char* cuf);
 
 
     /*
-     * first: index in parent's sub_nodes
-     * second: pointer
+     * Key is repeatable but no duplicated Key-Value pair
      */
 
-    template<typename KeyType, typename ValueType>
+    template<typename KeyType, typename ValueType, typename WeakCmp>
     class BPTree {
     private:
         enum {
@@ -83,20 +87,20 @@ namespace bptree {
          */
         NodePtr path_stack[STACK_DEPTH];
         int in_node_offset_stack[STACK_DEPTH]{};
-
+        WeakCmp les;
 
         int basic_search(const KeyType& key);
 
         size_t insert_inplace(NodePtr& node, const KeyType& key, const ValueType& value);
-        size_t insert_key_inplace(NodePtr& node, const KeyType& key, LocaType offset);
-        std::tuple<KeyType, LocaType> insert_key(NodePtr& node, const KeyType& key, LocaType offset);
+        size_t insert_key_inplace(NodePtr& node, const KeyType& key, DiskLoc_T offset);
+        std::tuple<KeyType, DiskLoc_T> insert_key(NodePtr& node, const KeyType& key, DiskLoc_T offset);
 
         bool remove_inplace(NodePtr& node, const KeyType& key);
-        void remove_offset_inplace(NodePtr& node, KeyType key, LocaType offset);
+        void remove_offset_inplace(NodePtr& node, KeyType key, DiskLoc_T offset);
         bool borrow_key(int index);
         bool borrow_value(int index);
-        LocaType merge_values(NodePtr& target, NodePtr& tobe, int direction);
-        LocaType merge_keys(KeyType mid_key, NodePtr& target, NodePtr& tobe, int direction);
+        DiskLoc_T merge_values(NodePtr& target, NodePtr& tobe, int direction);
+        DiskLoc_T merge_keys(KeyType mid_key, NodePtr& target, NodePtr& tobe, int direction);
 
         KeyType& find_mid_key(int index, int direction) const {
             return (LEFT == direction) ? (path_stack[index-1]->K[in_node_offset_stack[index]-1]) :
@@ -118,15 +122,15 @@ namespace bptree {
     protected:
         virtual void saveNode(NodePtr node) = 0;;
         virtual void deleteNode(NodePtr node) = 0;
-        virtual NodePtr loadNode(LocaType offset) = 0;
+        virtual NodePtr loadNode(DiskLoc_T offset) = 0;
         virtual NodePtr initNode(typename Node<KeyType, ValueType>::type_t t) = 0;
 
         /*
          * maintain structure
          */
-        LocaType root;
+        DiskLoc_T root;
     public:
-        BPTree() : root(Node<KeyType, ValueType>::NONE) {
+        BPTree(const WeakCmp& cmp=WeakCmp()) : root(Node<KeyType, ValueType>::NONE),les(cmp) {
             in_node_offset_stack[0] = NO_PARENT;
             for (auto& i : path_stack)i = nullptr;
         }
@@ -149,8 +153,8 @@ namespace bptree {
         ~BPTree() = default;
     };
 
-    template<typename KeyType, typename ValueType>
-    int BPTree<KeyType, ValueType>::basic_search(const KeyType& key) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    int BPTree<KeyType, ValueType, WeakCmp>::basic_search(const KeyType& key) {
         NodePtr cur = loadNode(root);
         path_stack[0] = cur;
         int counter = 0;
@@ -163,8 +167,8 @@ namespace bptree {
         return counter;
     }
 
-    template<typename KeyType, typename ValueType>
-    std::pair<ValueType, bool> BPTree<KeyType, ValueType>::search(const KeyType& key) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    std::pair<ValueType, bool> BPTree<KeyType, ValueType, WeakCmp>::search(const KeyType& key) {
         if (root == Node<KeyType, ValueType>::NONE)
             return {0, false};
         NodePtr cur = path_stack[basic_search(key)];
@@ -175,8 +179,8 @@ namespace bptree {
     }
 
 
-    template<typename KeyType, typename ValueType>
-    size_t BPTree<KeyType, ValueType>::insert_inplace(NodePtr& node, const KeyType& key, const ValueType& value) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    size_t BPTree<KeyType, ValueType, WeakCmp>::insert_inplace(NodePtr& node, const KeyType& key, const ValueType& value) {
         size_t i;
         if (!node->size) {
             node->K[0] = key;
@@ -195,8 +199,8 @@ namespace bptree {
         return i;
     }
 
-    template<typename KeyType, typename ValueType>
-    size_t BPTree<KeyType, ValueType>::insert_key_inplace(NodePtr& node, const KeyType& key, LocaType offset) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    size_t BPTree<KeyType, ValueType, WeakCmp>::insert_key_inplace(NodePtr& node, const KeyType& key, DiskLoc_T offset) {
         size_t i;
         if (!node->size) {
             node->K[0] = key;
@@ -215,9 +219,9 @@ namespace bptree {
         return i;
     }
 
-    template<typename KeyType, typename ValueType>
-    std::tuple<KeyType, LocaType>
-    BPTree<KeyType, ValueType>::insert_key(NodePtr& cur, const KeyType& key, bptree::LocaType offset) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    std::tuple<KeyType, DiskLoc_T>
+    BPTree<KeyType, ValueType, WeakCmp>::insert_key(NodePtr& cur, const KeyType& key, bptree::DiskLoc_T offset) {
         // @return new allocated node
         insert_key_inplace(cur, key, offset);
         NodePtr new_node = initNode(Node<KeyType, ValueType>::INTERNAL);
@@ -231,8 +235,8 @@ namespace bptree {
         return {cur->K[cur->size], new_node->offset};
     }
 
-    template<typename KeyType, typename ValueType>
-    void BPTree<KeyType, ValueType>::insert(const KeyType& key, const ValueType& value) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    void BPTree<KeyType, ValueType, WeakCmp>::insert(const KeyType& key, const ValueType& value) {
         if (root == Node<KeyType, ValueType>::NONE) {
             NodePtr ptr = initNode(Node<KeyType, ValueType>::LEAF);
             ptr->prev = ptr->next = Node<KeyType, ValueType>::NONE;
@@ -270,7 +274,7 @@ namespace bptree {
         // update parents
         --cur_index;
         KeyType key_update_ready = new_node->K[0];
-        LocaType processing_offset = new_node->offset;
+        DiskLoc_T processing_offset = new_node->offset;
         bool set_root = true;
         for (; cur_index >= 0; --cur_index) {
             if (path_stack[cur_index]->size < INTERNAL_MAX_ENTRY) {
@@ -294,8 +298,8 @@ namespace bptree {
     }
 
 
-    template<typename KeyType, typename ValueType>
-    bool BPTree<KeyType, ValueType>::remove_inplace(NodePtr& node, const KeyType& key) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    bool BPTree<KeyType, ValueType, WeakCmp>::remove_inplace(NodePtr& node, const KeyType& key) {
         auto& vs = node->V;
         auto& ks = node->K;
         size_t i = std::lower_bound(ks, ks+node->size, key)-ks;
@@ -308,8 +312,8 @@ namespace bptree {
         return true;
     }
 
-    template<typename KeyType, typename ValueType>
-    void BPTree<KeyType, ValueType>::remove_offset_inplace(NodePtr& node, KeyType key, LocaType offset) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    void BPTree<KeyType, ValueType, WeakCmp>::remove_offset_inplace(NodePtr& node, KeyType key, DiskLoc_T offset) {
         auto key_iter = std::lower_bound(node->K, node->K+node->size, key);
         move(key_iter+1, node->K+node->size, key_iter);
 
@@ -320,8 +324,8 @@ namespace bptree {
         saveNode(node);
     }
 
-    template<typename KeyType, typename ValueType>
-    bool BPTree<KeyType, ValueType>::borrow_value(int index) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    bool BPTree<KeyType, ValueType, WeakCmp>::borrow_value(int index) {
         NodePtr nearby = getLeft(index), node = path_stack[index];
         if (nearby && nearby->size > LEAF_MIN_ENTRY) {
             // Left
@@ -346,8 +350,8 @@ namespace bptree {
         return true;
     }
 
-    template<typename KeyType, typename ValueType>
-    bool BPTree<KeyType, ValueType>::borrow_key(int index) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    bool BPTree<KeyType, ValueType, WeakCmp>::borrow_key(int index) {
         NodePtr nearby = getLeft(index), node = path_stack[index];
         if (nearby && nearby->size > LEAF_MIN_ENTRY) {
             // Left
@@ -373,8 +377,8 @@ namespace bptree {
         return true;
     }
 
-    template<typename KeyType, typename ValueType>
-    LocaType BPTree<KeyType, ValueType>::merge_values(NodePtr& target, NodePtr& tobe, int direction) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    DiskLoc_T BPTree<KeyType, ValueType, WeakCmp>::merge_values(NodePtr& target, NodePtr& tobe, int direction) {
         if (RIGHT == direction) {
             // tobe is left to target
             move_backward(target->K, target->K+target->size, target->K+target->size+tobe->size);
@@ -399,14 +403,14 @@ namespace bptree {
             }
         }
         target->size += tobe->size;
-        LocaType ret = tobe->offset;
+        DiskLoc_T ret = tobe->offset;
         deleteNode(tobe);
         saveNode(target);
         return ret;
     }
 
-    template<typename KeyType, typename ValueType>
-    LocaType BPTree<KeyType, ValueType>::merge_keys(KeyType mid_key, NodePtr& target, NodePtr& tobe, int direction) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    DiskLoc_T BPTree<KeyType, ValueType, WeakCmp>::merge_keys(KeyType mid_key, NodePtr& target, NodePtr& tobe, int direction) {
         if (RIGHT == direction) {
             move_backward(target->K, target->K+target->size, target->K+target->size+tobe->size+1);
             move_backward(target->sub_nodes, target->sub_nodes+target->size+1,
@@ -420,15 +424,15 @@ namespace bptree {
             move(tobe->sub_nodes, tobe->sub_nodes+tobe->size+1, target->sub_nodes+target->size+1);
         }
         target->size += tobe->size+1;
-        LocaType ret = tobe->offset;
+        DiskLoc_T ret = tobe->offset;
         deleteNode(tobe);
         saveNode(target);
         return ret;
     }
 
 
-    template<typename KeyType, typename ValueType>
-    bool BPTree<KeyType, ValueType>::remove(const KeyType& key) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    bool BPTree<KeyType, ValueType, WeakCmp>::remove(const KeyType& key) {
         if (root == Node<KeyType, ValueType>::NONE)
             return false;
         int cur_index = basic_search(key);
@@ -444,7 +448,7 @@ namespace bptree {
         }
         NodePtr neighbor;
         // update these
-        LocaType updating_offset;
+        DiskLoc_T updating_offset;
         KeyType updating_key;
         if (borrow_value(cur_index)) {
             return true;
@@ -479,18 +483,25 @@ namespace bptree {
         return true;
     }
 
-    template<typename KeyType, typename ValueType>
-    std::vector<std::pair<KeyType, ValueType>> BPTree<KeyType, ValueType>::range(KeyType low, KeyType high) {
+    template<typename KeyType, typename ValueType, typename WeakCmp>
+    std::vector<std::pair<KeyType, ValueType>> BPTree<KeyType, ValueType, WeakCmp>::range(KeyType low, KeyType high) {
+        /*
+         * low <= key <= high
+         */
         decltype(range(KeyType(), KeyType())) ret;
-        NodePtr ptr = path_stack[basic_search(low)];
-        for (int i = (int) (lower_bound(ptr->K, ptr->K+ptr->size, low)-ptr->K); i < ptr->size; ++i) {
-            if (ptr->K[i] >= high)goto FIN;
+        NodePtr ptr = loadNode(root);
+        while (ptr->type == Node<KeyType, ValueType>::INTERNAL) {
+            int off = (les(ptr->K[0],low)) ? (int) (upper_bound(ptr->K, ptr->K+ptr->size, low,les)-ptr->K) : 0;
+            ptr = loadNode(ptr->sub_nodes[off]);
+        }
+        for (int i = (int) (lower_bound(ptr->K, ptr->K+ptr->size, low,les)-ptr->K); i < ptr->size; ++i) {
+            if (les(high ,ptr->K[i]))goto FIN;
             ret.emplace_back(ptr->K[i], ptr->V[i]);
         }
         while (ptr->next != Node<KeyType, ValueType>::NONE) {
             ptr = loadNode(ptr->next);
             for (int i = 0; i < ptr->size; ++i) {
-                if (ptr->K[i] >= high)goto FIN;
+                if (les(high, ptr->K[i]))goto FIN;
                 ret.emplace_back(ptr->K[i], ptr->V[i]);
             }
         }
@@ -514,7 +525,7 @@ namespace bptree {
         if (node->type == Node<KeyType, ValueType>::LEAF)
             memcpy(buf, (void*) &node->V, sizeof(ValueType)*DEGREE);
         else
-            memcpy(buf, (void*) &node->sub_nodes, sizeof(LocaType)*DEGREE);
+            memcpy(buf, (void*) &node->sub_nodes, sizeof(DiskLoc_T)*DEGREE);
 #undef write_attribute
     }
 
@@ -533,7 +544,7 @@ namespace bptree {
         if (node->type == Node<KeyType, ValueType>::LEAF)
             memcpy((void*) node->V, buf, sizeof(ValueType)*node->size);
         else
-            memcpy((void*) node->sub_nodes, buf, sizeof(LocaType)*(node->size+1));
+            memcpy((void*) node->sub_nodes, buf, sizeof(DiskLoc_T)*(node->size+1));
 #undef read_attribute
     }
 

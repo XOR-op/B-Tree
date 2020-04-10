@@ -2,143 +2,26 @@
 #ifndef BPTREE_CACHEDBPTREE_H
 #define BPTREE_CACHEDBPTREE_H
 
-#include "../include/unordered_map.h"
 #include <fstream>
 #include <cstring>
-#include <functional>
 #include "bptree.h"
-
+#include "cache.h"
 using std::ios;
 namespace bptree {
-    template <typename K,typename V>
-    using func_expire_t =std::function<void(Node<K,V>*)>;
-    template <typename K,typename V>
-    using func_load_t=std::function<void(LocaType, Node<K,V>*)>;
-
-    template <typename KeyType,typename ValueType>
-    class LRUCache {
-    private:
-        /*
-         * flag for double-linked list and freelist
-         */
-        typedef Node<KeyType,ValueType>* NodePtr;
-        const static size_t LIST_END = 0;
-
-        struct Block {
-            size_t next;
-            size_t prev;
-            Node<KeyType,ValueType> node;
-            bool dirty_page_bit;
-            Block() : next(LIST_END), prev(LIST_END),dirty_page_bit(false) {}
-        };
-
-        size_t count;
-        Block* pool;
-        std::unordered_map<LocaType, size_t> table;
-
-        size_t freelist_head;
-
-        func_load_t<KeyType,ValueType> f_load;
-        func_expire_t<KeyType,ValueType> f_expire;
-    public:
-        LRUCache(size_t block_count, func_load_t<KeyType,ValueType> load_func, func_expire_t<KeyType,ValueType> expire_func)
-                : count(block_count), freelist_head(1), f_load(load_func), f_expire(expire_func) {
-            pool = new Block[count+1];
-            for (int i=1; i <count; ++i)
-                pool[i].next = i+1;
-            pool[count].next = LIST_END;
-            pool[LIST_END].next=pool[LIST_END].prev=LIST_END;
-        }
-
-        LRUCache(const LRUCache&) = delete;
-
-        LRUCache& operator=(const LRUCache&) = delete;
-
-        bool remove(LocaType offset) {
-            auto iter = table.find(offset);
-            if (iter == table.end())return false;
-            auto& block = pool[iter->second];
-            pool[block.prev].next = block.next;
-            pool[block.next].prev = block.prev;
-            block.next = freelist_head;
-            freelist_head = iter->second;
-            if(pool[iter->second].dirty_page_bit)
-                f_expire(&block.node);
-            table.erase(offset);
-            return true;
-        }
-
-        NodePtr get(LocaType offset) {
-            auto iter = table.find(offset);
-            if (iter != table.end()) {
-                // cache hit
-                if (iter->second == pool[LIST_END].next) {
-                    return &pool[pool[LIST_END].next].node;
-                }
-                auto& block = pool[iter->second];
-                // remove from the ring
-                pool[block.prev].next = block.next;
-                pool[block.next].prev = block.prev;
-                // insert
-                block.next = pool[LIST_END].next;
-                block.prev = LIST_END;
-                pool[LIST_END].next = iter->second;
-                pool[block.next].prev = iter->second;
-                return &block.node;
-            }
-            // cache miss
-            if (freelist_head == LIST_END)
-                if(!remove(pool[pool[LIST_END].prev].node.offset))
-                    throw std::runtime_error("Cache:remove failed");
-            auto tmp=pool[freelist_head].next;
-            /*
-             * set block the head
-             * pool[freelist_head] will be assigned
-             */
-            pool[pool[LIST_END].next].prev = freelist_head;
-            pool[freelist_head].prev = LIST_END;
-            pool[freelist_head].next = pool[LIST_END].next;
-            pool[LIST_END].next = freelist_head;
-            f_load(offset, &pool[freelist_head].node);
-            pool[freelist_head].dirty_page_bit= false;
-            table[offset]=freelist_head;
-            // recover freelist_head
-            freelist_head=tmp;
-            return &pool[pool[LIST_END].next].node;
-        }
-
-        void dirty_bit_set(LocaType offset){ pool[table[offset]].dirty_page_bit= true;}
-        void destruct(){
-            for (size_t index = pool[LIST_END].next; index != LIST_END; index = pool[index].next) {
-                if(pool[index].dirty_page_bit)
-                    f_expire(&pool[index].node);
-            }
-            delete[] pool;
-            pool= nullptr;
-        }
-        ~LRUCache() {
-            // user must call destruct() manually.
-        }
-    };
     /*
      *  Cache size must be at least 4 times than the DEPTH in order to ensure work correctly.
      */
 
-    template<typename KeyType, typename ValueType>
-    class CachedBPTree;
 
-    template<typename KeyType, typename ValueType>
-    bool static createTree(const std::string& path);
-
-    template<typename KeyType, typename ValueType>
-    class CachedBPTree : public BPTree<KeyType, ValueType> {
+    template<typename KeyType, typename ValueType, typename WeakCmp=std::less<KeyType>>
+    class CachedBPTree : public BPTree<KeyType, ValueType,WeakCmp> {
     private:
         static const size_t NO_FREE = SIZE_MAX;
         typedef Node<KeyType,ValueType>* NodePtr;
 
-        LRUCache<KeyType,ValueType> cache;
+        cache::LRUCache<DiskLoc_T ,Node<KeyType,ValueType>> cache;
 
-        static void load(std::fstream& ifs, LocaType offset, NodePtr tobe_filled);
+        static void load(std::fstream& ifs, DiskLoc_T offset, NodePtr tobe_filled);
 
         static void flush(std::fstream& ofs, NodePtr node);
 
@@ -146,25 +29,25 @@ namespace bptree {
 
         void saveNode(NodePtr node) override;
 
-        NodePtr loadNode(LocaType offset) override;
+        NodePtr loadNode(DiskLoc_T offset) override;
 
         void deleteNode(NodePtr node) override;
 
+        bool createTree(const std::string& path);
+
         std::fstream file;
         size_t file_size;
-        LocaType freelist_head;
+        DiskLoc_T freelist_head;
     public:
         explicit CachedBPTree(const std::string& path, size_t block_size,bool create= false);
-
-        friend bool createTree<KeyType,ValueType>(const std::string& path);
 
         ~CachedBPTree();
     };
 
 
 
-    template<typename KeyType,typename ValueType>
-    void CachedBPTree<KeyType, ValueType>::flush(std::fstream& ofs, NodePtr node) {
+    template<typename KeyType,typename ValueType, typename WeakCmp>
+    void CachedBPTree<KeyType, ValueType,WeakCmp>::flush(std::fstream& ofs, NodePtr node) {
         char buffer[Node<KeyType,ValueType>::BLOCK_SIZE];
         writeBuffer(node, buffer);
         ofs.seekp(node->offset);
@@ -174,8 +57,8 @@ namespace bptree {
         if (ofs.fail())throw std::runtime_error("CacheBPTree: Write failure");
     }
 
-    template<typename KeyType,typename ValueType>
-    void CachedBPTree<KeyType,ValueType>::load(std::fstream& ifs, bptree::LocaType offset, NodePtr tobe_filled) {
+    template<typename KeyType,typename ValueType,typename WeakCmp>
+    void CachedBPTree<KeyType,ValueType,WeakCmp>::load(std::fstream& ifs, bptree::DiskLoc_T offset, NodePtr tobe_filled) {
         char buffer[Node<KeyType,ValueType>::BLOCK_SIZE];
         ifs.seekg(offset);
         if (ifs.fail())throw std::runtime_error("CacheBPTree: Can't read");
@@ -184,8 +67,8 @@ namespace bptree {
         if (ifs.fail())throw std::runtime_error("CacheBPTree: Read failure");
     }
 
-    template<typename KeyType,typename ValueType>
-    Node<KeyType,ValueType>* CachedBPTree<KeyType,ValueType>::initNode(typename bptree::Node<KeyType,ValueType>::type_t t) {
+    template<typename KeyType,typename ValueType,typename WeakCmp>
+    Node<KeyType,ValueType>* CachedBPTree<KeyType,ValueType,WeakCmp>::initNode(typename bptree::Node<KeyType,ValueType>::type_t t) {
         typedef Node<KeyType,ValueType> Node;
         if (freelist_head == NO_FREE) {
             // extend file
@@ -209,19 +92,19 @@ namespace bptree {
         return ptr;
     }
 
-    template<typename KeyType,typename ValueType>
-    void CachedBPTree<KeyType,ValueType>::saveNode(NodePtr node) {
+    template<typename KeyType,typename ValueType,typename WeakCmp>
+    void CachedBPTree<KeyType,ValueType,WeakCmp>::saveNode(NodePtr node) {
         cache.dirty_bit_set(node->offset);
     }
 
-    template<typename KeyType,typename ValueType>
-    Node<KeyType,ValueType>* CachedBPTree<KeyType,ValueType>::loadNode(bptree::LocaType offset) {
+    template<typename KeyType,typename ValueType,typename WeakCmp>
+    Node<KeyType,ValueType>* CachedBPTree<KeyType,ValueType,WeakCmp>::loadNode(bptree::DiskLoc_T offset) {
         return cache.get(offset);
     }
 
 
-    template<typename KeyType,typename ValueType>
-    void CachedBPTree<KeyType,ValueType>::deleteNode(NodePtr node) {
+    template<typename KeyType,typename ValueType,typename WeakCmp>
+    void CachedBPTree<KeyType,ValueType,WeakCmp>::deleteNode(NodePtr node) {
         node->type = Node<KeyType,ValueType>::FREE;
         node->next = freelist_head;
         auto tmp = node->next;
@@ -230,8 +113,8 @@ namespace bptree {
         freelist_head = tmp;
     }
 
-    template <typename KeyType,typename ValueType>
-    static bool createTree(const std::string& path) {
+    template <typename KeyType,typename ValueType,typename WeakCmp>
+    bool CachedBPTree<KeyType,ValueType,WeakCmp>::createTree(const std::string& path) {
         std::fstream f(path, ios::in | ios::out | ios::binary);
         if (f.is_open() || f.bad()) { return false; }
         f.close();
@@ -240,8 +123,8 @@ namespace bptree {
         char buf[sizeof(CachedBPTree<KeyType,ValueType>::file_size)+sizeof(CachedBPTree<KeyType,ValueType>::freelist_head)+sizeof(CachedBPTree<KeyType,ValueType>::root)];
         char* ptr = buf;
         size_t size = sizeof(buf);
-        LocaType free = CachedBPTree<KeyType,ValueType>::NO_FREE;
-        LocaType t = Node<KeyType,ValueType>::NONE;
+        DiskLoc_T free = CachedBPTree<KeyType,ValueType>::NO_FREE;
+        DiskLoc_T t = Node<KeyType,ValueType>::NONE;
         write_attribute(size);
         write_attribute(free);
         write_attribute(t); // root
@@ -252,13 +135,14 @@ namespace bptree {
 #undef write_attribute
     }
 
-    template<typename KeyType,typename ValueType>
-    CachedBPTree<KeyType,ValueType>::CachedBPTree(const std::string& path, size_t block_size,bool create) :
-            BPTree<KeyType,ValueType>(),
-            cache(block_size, [this](LocaType o, NodePtr r) { load(file, o, r); }, [this](NodePtr o) { flush(file, o); }) {
+    template<typename KeyType,typename ValueType,typename WeakCmp>
+    CachedBPTree<KeyType,ValueType,WeakCmp>::CachedBPTree(const std::string& path, size_t block_size,bool create) :
+            BPTree<KeyType,ValueType,WeakCmp>(),
+            cache(block_size, [this](DiskLoc_T o, NodePtr r) { load(file, o, r); }, [this](DiskLoc_T o,NodePtr r) { flush(file, r); }) {
         if(create)
-            createTree<KeyType,ValueType>(path);
-        file=std::fstream (path, ios::in | ios::out | ios::binary);
+            createTree(path);
+        file.rdbuf()->pubsetbuf(nullptr,0);
+        file.open(path, ios::in | ios::out | ios::binary);
         if (file.bad()) {
             throw std::runtime_error("CacheBPTree: Open B+ Tree failed.");
         }
@@ -273,8 +157,8 @@ namespace bptree {
 #undef read_attribute
     }
 
-    template<typename KeyType,typename ValueType>
-    CachedBPTree<KeyType,ValueType>::~CachedBPTree() {
+    template<typename KeyType,typename ValueType,typename WeakCmp>
+    CachedBPTree<KeyType,ValueType,WeakCmp>::~CachedBPTree() {
 #define write_attribute(ATTR) memcpy(ptr,(void*)&ATTR,sizeof(ATTR));ptr+=sizeof(ATTR)
         char buf[sizeof(file_size)+sizeof(freelist_head)+sizeof(this->root)];
         char* ptr = buf;

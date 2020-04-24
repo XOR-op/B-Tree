@@ -7,12 +7,12 @@
 
 #include <functional>
 #include "../include/unordered_map.h"
-#include "analysis.h"
-Debug::Count __Counter;
+//#include "analysis.h"
+//Debug::Count __Counter;
 namespace cache{
 
     template <typename DiskLoc_T,typename T>
-    using func_expire_t =std::function<void(DiskLoc_T,T*)>;
+    using func_expire_t =std::function<void(DiskLoc_T,const T*)>;
     template <typename DiskLoc_T,typename T>
     using func_load_t=std::function<void(DiskLoc_T, T*)>;
 
@@ -65,7 +65,7 @@ namespace cache{
             block.next = freelist_head;
             freelist_head = iter->second;
             if(pool[iter->second].dirty_page_bit) {
-                __Counter.dirty();
+//                __Counter.dirty();
                 f_expire(block.where, &block.data);
             }
             table.erase(offset);
@@ -76,7 +76,7 @@ namespace cache{
             auto iter = table.find(offset);
             if (iter != table.end()) {
                 // cache hit
-                __Counter.hit();
+//                __Counter.hit();
                 if (iter->second == pool[LIST_END].next) {
                     return &pool[pool[LIST_END].next].data;
                 }
@@ -92,10 +92,10 @@ namespace cache{
                 return &block.data;
             }
             // cache miss
-            __Counter.miss();
+//            __Counter.miss();
             if (freelist_head == LIST_END)
-                if(!remove(pool[pool[LIST_END].prev].data.offset))
-                    throw std::runtime_error("Cache:remove failed");
+                if(!remove(pool[pool[LIST_END].prev].where))
+                    throw std::logic_error("Cache:remove failed");
             auto tmp=pool[freelist_head].next;
             /*
              * set block the head

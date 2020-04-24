@@ -1,11 +1,12 @@
 
-#ifndef BPTREE_CACHEDBPTREE_H
-#define BPTREE_CACHEDBPTREE_H
+#ifndef BPTREE_LRUBPTREE_H
+#define BPTREE_LRUBPTREE_H
 
 #include <fstream>
 #include <cstring>
 #include "bptree.h"
 #include "cache.h"
+#include "../include/file_alternative.h"
 using std::ios;
 namespace bptree {
     /*
@@ -14,16 +15,18 @@ namespace bptree {
 
 
     template<typename KeyType, typename ValueType, typename WeakCmp=std::less<KeyType>>
-    class CachedBPTree : public BPTree<KeyType, ValueType,WeakCmp> {
+    class LRUBPTree : public BPTree<KeyType, ValueType,WeakCmp> {
     private:
         static const size_t NO_FREE = SIZE_MAX;
         typedef Node<KeyType,ValueType>* NodePtr;
+        typedef const Node<KeyType,ValueType>* ConstNodePtr;
+
 
         cache::LRUCache<DiskLoc_T ,Node<KeyType,ValueType>> cache;
 
-        static void load(std::fstream& ifs, DiskLoc_T offset, NodePtr tobe_filled);
+        static void load(ds::File& ifs, DiskLoc_T offset, NodePtr tobe_filled);
 
-        static void flush(std::fstream& ofs, NodePtr node);
+        static void flush(ds::File& ofs, ConstNodePtr node);
 
         NodePtr initNode(typename Node<KeyType, ValueType>::type_t t) override;
 
@@ -35,30 +38,38 @@ namespace bptree {
 
         bool createTree(const std::string& path);
 
-        std::fstream file;
+//        std::fstream file;
+        ds::File file;
         size_t file_size;
         DiskLoc_T freelist_head;
     public:
-        explicit CachedBPTree(const std::string& path, size_t block_size,bool create= false);
+        LRUBPTree(const std::string& path, size_t block_size, bool create= false);
 
-        ~CachedBPTree();
+//        LRUBPTree()=default;
+//
+//        void open(const std::string& path,std::size_t block_size,bool create= false){
+//            if(create)
+//                createTree(path);
+//            file.open(path.c_str());
+//        }
+
+        ~LRUBPTree();
     };
 
 
 
     template<typename KeyType,typename ValueType, typename WeakCmp>
-    void CachedBPTree<KeyType, ValueType,WeakCmp>::flush(std::fstream& ofs, NodePtr node) {
+    void LRUBPTree<KeyType, ValueType,WeakCmp>::flush(ds::File& ofs, ConstNodePtr node) {
         char buffer[Node<KeyType,ValueType>::BLOCK_SIZE];
         writeBuffer(node, buffer);
         ofs.seekp(node->offset);
         if (ofs.fail())throw std::runtime_error("CacheBPTree: Can't write");
         ofs.write(buffer, Node<KeyType,ValueType>::BLOCK_SIZE);
-//        ofs.flush();
         if (ofs.fail())throw std::runtime_error("CacheBPTree: Write failure");
     }
 
     template<typename KeyType,typename ValueType,typename WeakCmp>
-    void CachedBPTree<KeyType,ValueType,WeakCmp>::load(std::fstream& ifs, bptree::DiskLoc_T offset, NodePtr tobe_filled) {
+    void LRUBPTree<KeyType,ValueType,WeakCmp>::load(ds::File& ifs, bptree::DiskLoc_T offset, NodePtr tobe_filled) {
         char buffer[Node<KeyType,ValueType>::BLOCK_SIZE];
         ifs.seekg(offset);
         if (ifs.fail())throw std::runtime_error("CacheBPTree: Can't read");
@@ -68,7 +79,7 @@ namespace bptree {
     }
 
     template<typename KeyType,typename ValueType,typename WeakCmp>
-    Node<KeyType,ValueType>* CachedBPTree<KeyType,ValueType,WeakCmp>::initNode(typename bptree::Node<KeyType,ValueType>::type_t t) {
+    Node<KeyType,ValueType>* LRUBPTree<KeyType,ValueType,WeakCmp>::initNode(typename bptree::Node<KeyType,ValueType>::type_t t) {
         typedef Node<KeyType,ValueType> Node;
         if (freelist_head == NO_FREE) {
             // extend file
@@ -81,7 +92,6 @@ namespace bptree {
             writeBuffer(&n, block);
             file.seekp(file_size);
             file.write(block, Node::BLOCK_SIZE);
-//            file.flush();
             if (file.fail())throw std::runtime_error("CacheBPTree: initNode()");
             freelist_head = file_size;
             file_size += Node::BLOCK_SIZE;
@@ -93,18 +103,18 @@ namespace bptree {
     }
 
     template<typename KeyType,typename ValueType,typename WeakCmp>
-    void CachedBPTree<KeyType,ValueType,WeakCmp>::saveNode(NodePtr node) {
+    void LRUBPTree<KeyType,ValueType,WeakCmp>::saveNode(NodePtr node) {
         cache.dirty_bit_set(node->offset);
     }
 
     template<typename KeyType,typename ValueType,typename WeakCmp>
-    Node<KeyType,ValueType>* CachedBPTree<KeyType,ValueType,WeakCmp>::loadNode(bptree::DiskLoc_T offset) {
+    Node<KeyType,ValueType>* LRUBPTree<KeyType,ValueType,WeakCmp>::loadNode(bptree::DiskLoc_T offset) {
         return cache.get(offset);
     }
 
 
     template<typename KeyType,typename ValueType,typename WeakCmp>
-    void CachedBPTree<KeyType,ValueType,WeakCmp>::deleteNode(NodePtr node) {
+    void LRUBPTree<KeyType,ValueType,WeakCmp>::deleteNode(NodePtr node) {
         node->type = Node<KeyType,ValueType>::FREE;
         node->next = freelist_head;
         auto tmp = node->next;
@@ -114,16 +124,16 @@ namespace bptree {
     }
 
     template <typename KeyType,typename ValueType,typename WeakCmp>
-    bool CachedBPTree<KeyType,ValueType,WeakCmp>::createTree(const std::string& path) {
+    bool LRUBPTree<KeyType,ValueType,WeakCmp>::createTree(const std::string& path) {
         std::fstream f(path, ios::in | ios::out | ios::binary);
         if (f.is_open() || f.bad()) { return false; }
         f.close();
         f = std::fstream(path, ios::out | ios::binary);
 #define write_attribute(ATTR) memcpy(ptr,(void*)&ATTR,sizeof(ATTR));ptr+=sizeof(ATTR)
-        char buf[sizeof(CachedBPTree<KeyType,ValueType>::file_size)+sizeof(CachedBPTree<KeyType,ValueType>::freelist_head)+sizeof(CachedBPTree<KeyType,ValueType>::root)];
+        char buf[sizeof(LRUBPTree<KeyType,ValueType>::file_size)+sizeof(LRUBPTree<KeyType,ValueType>::freelist_head)+sizeof(LRUBPTree<KeyType,ValueType>::root)];
         char* ptr = buf;
         size_t size = sizeof(buf);
-        DiskLoc_T free = CachedBPTree<KeyType,ValueType>::NO_FREE;
+        DiskLoc_T free = LRUBPTree<KeyType,ValueType>::NO_FREE;
         DiskLoc_T t = Node<KeyType,ValueType>::NONE;
         write_attribute(size);
         write_attribute(free);
@@ -135,17 +145,15 @@ namespace bptree {
 #undef write_attribute
     }
 
+
+
     template<typename KeyType,typename ValueType,typename WeakCmp>
-    CachedBPTree<KeyType,ValueType,WeakCmp>::CachedBPTree(const std::string& path, size_t block_size,bool create) :
+    LRUBPTree<KeyType,ValueType,WeakCmp>::LRUBPTree(const std::string& path, size_t block_size, bool create) :
             BPTree<KeyType,ValueType,WeakCmp>(),
-            cache(block_size, [this](DiskLoc_T o, NodePtr r) { load(file, o, r); }, [this](DiskLoc_T o,NodePtr r) { flush(file, r); }) {
+            cache(block_size, [this](DiskLoc_T o, NodePtr r) { load(file, o, r); }, [this](DiskLoc_T o,ConstNodePtr r) { flush(file, r); }) {
         if(create)
             createTree(path);
-        file.rdbuf()->pubsetbuf(nullptr,0);
-        file.open(path, ios::in | ios::out | ios::binary);
-        if (file.bad()) {
-            throw std::runtime_error("CacheBPTree: Open B+ Tree failed.");
-        }
+        file.open(path.c_str());
         char buf[sizeof(file_size)+sizeof(freelist_head)+sizeof(this->root)];
         char* ptr = buf;
         file.seekg(0);
@@ -158,7 +166,7 @@ namespace bptree {
     }
 
     template<typename KeyType,typename ValueType,typename WeakCmp>
-    CachedBPTree<KeyType,ValueType,WeakCmp>::~CachedBPTree() {
+    LRUBPTree<KeyType,ValueType,WeakCmp>::~LRUBPTree() {
 #define write_attribute(ATTR) memcpy(ptr,(void*)&ATTR,sizeof(ATTR));ptr+=sizeof(ATTR)
         char buf[sizeof(file_size)+sizeof(freelist_head)+sizeof(this->root)];
         char* ptr = buf;
@@ -173,4 +181,4 @@ namespace bptree {
 #undef write_attribute
     }
 }
-#endif //BPTREE_CACHEDBPTREE_H
+#endif //BPTREE_LRUBPTREE_H

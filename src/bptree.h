@@ -159,7 +159,7 @@ namespace bptree {
         path_stack[0] = cur;
         int counter = 0;
         while (cur->type == Node<KeyType, ValueType>::INTERNAL) {
-            int off = (key >= cur->K[0]) ? (int) (upper_bound(cur->K, cur->K+cur->size, key)-cur->K) : 0;
+            int off = (key < cur->K[0]) ? 0:(int) (upper_bound(cur->K, cur->K+cur->size, key)-cur->K) ;
             cur = loadNode(cur->sub_nodes[off]);
             path_stack[++counter] = cur;
             in_node_offset_stack[counter] = off;
@@ -170,12 +170,12 @@ namespace bptree {
     template<typename KeyType, typename ValueType, typename WeakCmp>
     std::pair<ValueType, bool> BPTree<KeyType, ValueType, WeakCmp>::search(const KeyType& key) {
         if (root == Node<KeyType, ValueType>::NONE)
-            return {0, false};
+            return {ValueType(), false};
         NodePtr cur = path_stack[basic_search(key)];
         size_t i = lower_bound(cur->K, cur->K+cur->size, key)-cur->K;
         if (i < cur->size && key == cur->K[i])
             return {cur->V[i], true};
-        else return {0, false};
+        else return {ValueType(), false};
     }
 
 
@@ -511,7 +511,7 @@ namespace bptree {
 
 
     template<typename KeyType, typename ValueType>
-    void writeBuffer(Node<KeyType, ValueType>* node, char* buf) {
+    void writeBuffer(const Node<KeyType, ValueType>* node,char* buf) {
 # define write_attribute(ATTR) memcpy(buf,(void*)&node->ATTR,sizeof(node->ATTR));buf+=sizeof(node->ATTR)
         write_attribute(type);
         write_attribute(offset);

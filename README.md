@@ -1,7 +1,7 @@
 # B-Tree
 A single-file high performance B+ Tree, with LRU cache in memory to boost the performance.
 ## Use
-bptree::CachedBPTree has integrated LRU cache in it. You can include `CachedBPTree.h` to use it.
+bptree::LRUBPTree has integrated LRU cache in it. You can include `LRUBPTree.h` to use it.
 - search(K): search specified key and return std::pair<KeyType,bool>. Not found if `pair->second` is False.
 - insert(K, V): insert a pair of data
 - remove(K): remove the pair with the specified key
